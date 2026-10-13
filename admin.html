@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>客服工作台</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  body { font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;
+    background:#f1f5f9; height:100vh; overflow:hidden; }
+  .app { display:flex; height:100vh; }
+  /* 侧栏：会话列表 */
+  .side { width:300px; background:#fff; border-right:1px solid #e2e8f0; display:flex; flex-direction:column; }
+  @media(max-width:720px){ .side{ position:absolute; z-index:20; height:100%; transform:translateX(-100%); transition:.25s; }
+    .side.show{ transform:translateX(0); box-shadow:0 0 40px rgba(0,0,0,.2);} }
+  .side .hd { padding:14px 16px; background:#1e293b; color:#fff; display:flex; align-items:center; justify-content:space-between; }
+  .side .hd b { font-size:16px; }
+  .side .hd a { color:#94a3b8; font-size:13px; text-decoration:none; }
+  .vlist { flex:1; overflow-y:auto; }
+  .vitem { padding:12px 16px; border-bottom:1px solid #f1f5f9; cursor:pointer; position:relative; }
+  .vitem:hover { background:#f8fafc; }
+  .vitem.active { background:#eff6ff; }
+  .vitem .nm { font-weight:600; font-size:15px; color:#1e293b; display:flex; align-items:center; gap:6px; }
+  .vitem .lm { font-size:13px; color:#64748b; margin-top:3px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .vitem .tm { font-size:11px; color:#94a3b8; float:right; }
+  .badge { background:#ef4444; color:#fff; font-size:11px; min-width:18px; height:18px; border-radius:9px;
+    padding:0 5px; display:inline-flex; align-items:center; justify-content:center; font-weight:600; }
+  .empty { text-align:center; color:#94a3b8; padding:40px 20px; font-size:14px; }
+  /* 主聊天区 */
+  .main { flex:1; display:flex; flex-direction:column; }
+  .chat-hd { padding:13px 16px; background:#fff; border-bottom:1px solid #e2e8f0; display:flex; align-items:center; gap:10px; }
+  .chat-hd .back { display:none; font-size:22px; cursor:pointer; color:#475569; }
+  @media(max-width:720px){ .chat-hd .back{ display:block; } }
+  .chat-hd .nm { font-weight:600; font-size:16px; color:#1e293b; }
+  .msgs { flex:1; overflow-y:auto; padding:18px; display:flex; flex-direction:column; gap:12px; background:#f1f5f9; }
+  .bubble { max-width:70%; padding:10px 14px; border-radius:16px; font-size:15px; line-height:1.5; word-break:break-word; white-space:pre-wrap; }
+  .them { background:#fff; align-self:flex-start; border-bottom-left-radius:4px; box-shadow:0 1px 2px rgba(0,0,0,.06); }
+  .me { background:#3b82f6; color:#fff; align-self:flex-end; border-bottom-right-radius:4px; }
+  .time { align-self:center; font-size:11px; color:#94a3b8; }
+  .placeholder { margin:auto; color:#94a3b8; text-align:center; }
+  .inputbar { display:flex; gap:8px; padding:10px; background:#fff; border-top:1px solid #e2e8f0; }
+  .inputbar input { flex:1; border:1px solid #e2e8f0; background:#f8fafc; border-radius:22px; padding:10px 16px; font-size:15px; outline:none; }
+  .inputbar input:focus { border-color:#3b82f6; }
+  .send { background:#3b82f6; color:#fff; border:none; border-radius:22px; padding:0 22px; font-size:15px; cursor:pointer; }
+  .send:active{ opacity:.85; }
+  /* 登录遮罩 */
+  .login { position:fixed; inset:0; background:rgba(15,23,42,.6); display:flex; align-items:center; justify-content:center; z-index:50; }
+  .login .box { background:#fff; border-radius:16px; padding:32px 28px; width:90%; max-width:340px; text-align:center; }
+  .login h2 { font-size:20px; color:#1e293b; margin-bottom:18px; }
+  .login input { width:100%; border:1px solid #e2e8f0; border-radius:10px; padding:12px 14px; font-size:15px; outline:none; margin-bottom:12px; }
+  .login button { width:100%; background:#3b82f6; color:#fff; border:none; border-radius:10px; padding:12px; font-size:16px; cursor:pointer; }
+  .login .err { color:#ef4444; font-size:13px; margin-top:10px; min-height:18px; }
+</style>
+</head>
+<body>
+<!-- 登录 -->
+<div class="login" id="login">
+  <div class="box">
+    <h2>🔐 客服登录</h2>
+    <input id="pwd" type="password" placeholder="请输入管理口令" maxlength="40">
+    <button id="loginBtn">登录</button>
+    <div class="err" id="loginErr"></div>
+  </div>
+</div>
+
+<div class="app">
+  <div class="side" id="side">
+    <div class="hd"><b>客户会话</b><a href="/chat.html" target="_blank">打开客户窗口</a></div>
+    <div class="vlist" id="vlist"><div class="empty">暂无会话</div></div>
+  </div>
+  <div class="main">
+    <div class="chat-hd">
+      <span class="back" id="back">‹</span>
+      <span class="nm" id="chatName">选择一个会话</span>
+    </div>
+    <div class="msgs" id="msgs"><div class="placeholder">从左侧选择一个客户开始对话</div></div>
+    <div class="inputbar">
+      <input id="inp" type="text" placeholder="输入回复..." maxlength="2000" autocomplete="off">
+      <button class="send" id="sendBtn">发送</button>
+    </div>
+  </div>
+</div>
+<script>
+(function(){
+  var AKEY = sessionStorage.getItem('os_admin_key') || '';
+  var curVid=null, curName='', lastCount=0;
+  var vlist=document.getElementById('vlist'), msgsEl=document.getElementById('msgs'),
+      inp=document.getElementById('inp'), sendBtn=document.getElementById('sendBtn'),
+      chatName=document.getElementById('chatName'), side=document.getElementById('side'),
+      login=document.getElementById('login');
+
+  function api(u,opt){
+    opt=opt||{}; opt.headers=Object.assign({'x-admin-key':AKEY}, opt.headers||{});
+    return fetch(u,opt).then(function(r){ return r.json(); });
+  }
+  function esc(s){ var d=document.createElement('div'); d.textContent=s; return d.innerHTML; }
+  function fmtTime(ts){ var d=new Date(ts); return (d.getHours()<10?'0':'')+d.getHours()+':'+(d.getMinutes()<10?'0':'')+d.getMinutes(); }
+  function scrollBottom(){ msgsEl.scrollTop=msgsEl.scrollHeight; }
+
+  // 登录
+  document.getElementById('loginBtn').onclick=function(){ loginFn(); };
+  document.getElementById('pwd').addEventListener('keydown',function(e){ if(e.key==='Enter') loginFn(); });
+  function loginFn(){
+    var v=document.getElementById('pwd').value.trim();
+    if(!v){ document.getElementById('loginErr').textContent='请输入口令'; return; }
+    AKEY=v;
+    api('/api/visitors').then(function(d){
+      if(d.error){ document.getElementById('loginErr').textContent='口令错误'; AKEY=''; return; }
+      sessionStorage.setItem('os_admin_key',AKEY);
+      login.style.display='none';
+      startPolling();
+    }).catch(function(){ document.getElementById('loginErr').textContent='网络错误'; });
+  }
+
+  // 拉会话列表
+  function loadList(){
+    api('/api/visitors').then(function(d){
+      if(!d.visitors){ return; }
+      if(d.visitors.length===0){ vlist.innerHTML='<div class="empty">暂无会话</div>'; return; }
+      vlist.innerHTML=d.visitors.map(function(v){
+        var unread = v.unread_for_agent>0 ? '<span class="badge">'+v.unread_for_agent+'</span>' : '';
+        var t=new Date(v.last_active);
+        var tm=(t.getMonth()+1)+'/'+t.getDate()+' '+fmtTime(t.getTime());
+        return '<div class="vitem'+(v.visitor_id===curVid?' active':'')+'" data-vid="'+v.visitor_id+'" data-name="'+esc(v.name)+'">'+
+          '<span class="tm">'+tm+'</span><div class="nm">'+esc(v.name)+unread+'</div>'+
+          '<div class="lm">'+esc(v.last_message||'')+'</div></div>';
+      }).join('');
+      Array.prototype.forEach.call(vlist.querySelectorAll('.vitem'),function(el){
+        el.onclick=function(){
+          curVid=el.getAttribute('data-vid');
+          curName=el.getAttribute('data-name');
+          chatName.textContent=curName;
+          side.classList.remove('show');
+          openThread();
+        };
+      });
+    }).catch(function(){});
+  }
+
+  // 拉当前会话消息
+  function openThread(){
+    api('/api/thread?visitor_id='+encodeURIComponent(curVid)).then(function(d){
+      render(d.messages||[]);
+      lastCount=(d.messages||[]).length;
+    }).catch(function(){});
+  }
+  function render(msgs){
+    msgsEl.innerHTML=msgs.map(function(m){
+      var cls=m.from==='agent'?'me':'them';
+      return '<div class="bubble '+cls+'">'+esc(m.text)+'</div><div class="time">'+fmtTime(m.at)+'</div>';
+    }).join('');
+    scrollBottom();
+  }
+  // 当前会话轮询刷新
+  function pollCurrent(){
+    if(!curVid) return;
+    api('/api/thread?visitor_id='+encodeURIComponent(curVid)).then(function(d){
+      if(d.messages && d.messages.length!==lastCount){ render(d.messages); lastCount=d.messages.length; }
+    }).catch(function(){});
+  }
+  function startPolling(){
+    loadList();
+    setInterval(loadList, 4000);
+    setInterval(pollCurrent, 3000);
+  }
+
+  // 发送
+  function send(){
+    if(!curVid){ alert('请先选择一个会话'); return; }
+    var text=inp.value.trim(); if(!text) return;
+    sendBtn.disabled=true;
+    api('/api/reply',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({visitor_id:curVid,text:text})}).then(function(d){
+      if(d.ok){ inp.value=''; pollCurrent(); }
+      else alert(d.error||'发送失败');
+    }).catch(function(){ alert('网络错误'); })
+    .finally(function(){ sendBtn.disabled=false; });
+  }
+  sendBtn.onclick=send;
+  inp.addEventListener('keydown',function(e){ if(e.key==='Enter') send(); });
+
+  // 移动端返回按钮
+  document.getElementById('back').onclick=function(){ side.classList.toggle('show'); };
+})();
+</script>
+</body>
+</html>

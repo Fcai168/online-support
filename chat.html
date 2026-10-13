@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>在线客服</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  :root { --brand:#3b82f6; --bg:#f1f5f9; --me:#3b82f6; --them:#fff; }
+  body { font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;
+    background:var(--bg); height:100vh; display:flex; align-items:center; justify-content:center; }
+  .wrap { width:100%; max-width:520px; height:100vh; display:flex; flex-direction:column; background:#fff; }
+  @media(min-width:540px){ .wrap{ height:92vh; border-radius:16px; overflow:hidden; box-shadow:0 20px 60px rgba(0,0,0,.15);} }
+  .header { background:var(--brand); color:#fff; padding:14px 16px; display:flex; align-items:center; gap:10px; }
+  .avatar { width:38px; height:38px; border-radius:50%; background:rgba(255,255,255,.25);
+    display:flex; align-items:center; justify-content:center; font-size:18px; }
+  .header .info { flex:1; }
+  .header .name { font-size:16px; font-weight:600; }
+  .header .status { font-size:12px; opacity:.9; display:flex; align-items:center; gap:5px; }
+  .dot { width:8px; height:8px; border-radius:50%; background:#22c55e; }
+  .dot.off { background:#94a3b8; }
+  .msgs { flex:1; overflow-y:auto; padding:16px; display:flex; flex-direction:column; gap:12px; }
+  .bubble { max-width:78%; padding:10px 14px; border-radius:16px; font-size:15px; line-height:1.5;
+    word-break:break-word; white-space:pre-wrap; animation:pop .15s ease; }
+  @keyframes pop { from{opacity:0; transform:translateY(4px);} to{opacity:1;} }
+  .them { background:var(--them); align-self:flex-start; border-bottom-left-radius:4px; box-shadow:0 1px 2px rgba(0,0,0,.06); }
+  .me { background:var(--me); color:#fff; align-self:flex-end; border-bottom-right-radius:4px; }
+  .time { align-self:center; font-size:11px; color:#94a3b8; }
+  .inputbar { display:flex; gap:8px; padding:10px; border-top:1px solid #e2e8f0; background:#fff; }
+  .inputbar input { flex:1; border:1px solid #e2e8f0; background:#f8fafc; border-radius:22px;
+    padding:10px 16px; font-size:15px; outline:none; }
+  .inputbar input:focus { border-color:var(--brand); }
+  .send { background:var(--brand); color:#fff; border:none; border-radius:22px;
+    padding:0 20px; font-size:15px; cursor:pointer; }
+  .send:active { opacity:.85; }
+  .intro { text-align:center; color:#94a3b8; font-size:13px; padding:20px 10px 0; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="header">
+    <div class="avatar">💬</div>
+    <div class="info">
+      <div class="name">在线客服</div>
+      <div class="status"><span class="dot" id="dot"></span><span id="statusText">在线</span></div>
+    </div>
+  </div>
+  <div class="msgs" id="msgs">
+    <div class="intro">您好，很高兴为您服务 😊<br>请直接输入您的问题</div>
+  </div>
+  <div class="inputbar">
+    <input id="inp" type="text" placeholder="输入消息..." maxlength="2000" autocomplete="off">
+    <button class="send" id="sendBtn">发送</button>
+  </div>
+</div>
+<script>
+(function(){
+  // 跨设备 visitor_id：存 localStorage，同一浏览器同一访客
+  var KEY='os_visitor_id', KEY2='os_visitor_name';
+  var vid = localStorage.getItem(KEY);
+  var name = localStorage.getItem(KEY2);
+  if(!vid){ vid='v-'+Date.now().toString(36)+Math.random().toString(36).slice(2,7);
+    localStorage.setItem(KEY,vid); localStorage.setItem(KEY2,name||''); }
+  var msgsEl=document.getElementById('msgs'), inp=document.getElementById('inp'),
+      sendBtn=document.getElementById('sendBtn'), dot=document.getElementById('dot'),
+      statusText=document.getElementById('statusText');
+  var lastCount=0, agentReplied=false;
+
+  function api(u,opt){ return fetch(u,opt).then(function(r){return r.json();}); }
+  function scrollBottom(){ msgsEl.scrollTop=msgsEl.scrollHeight; }
+  function fmtTime(ts){ var d=new Date(ts); return (d.getHours()<10?'0':'')+d.getHours()+':'+(d.getMinutes()<10?'0':'')+d.getMinutes(); }
+  function esc(s){ var d=document.createElement('div'); d.textContent=s; return d.innerHTML; }
+
+  function render(msgs){
+    var out='<div class="intro">您好，很高兴为您服务 😊<br>请直接输入您的问题</div>';
+    var lastDay='';
+    msgs.forEach(function(m){
+      var cls = m.from==='visitor' ? 'me' : 'them';
+      out += '<div class="bubble '+cls+'">'+esc(m.text)+'</div>';
+      out += '<div class="time">'+fmtTime(m.at)+'</div>';
+    });
+    msgsEl.innerHTML=out;
+    scrollBottom();
+  }
+
+  function pull(){
+    api('/api/messages?visitor_id='+encodeURIComponent(vid)).then(function(d){
+      if(d.messages){
+        var changed = d.messages.length!==lastCount;
+        render(d.messages);
+        lastCount=d.messages.length;
+        // 在线状态：最近有客服回复则视为在线
+        var last=d.messages[d.messages.length-1];
+        if(last && last.from==='agent'){ dot.classList.remove('off'); statusText.textContent='在线'; }
+      }
+    }).catch(function(){});
+  }
+
+  function send(){
+    var text=inp.value.trim(); if(!text) return;
+    sendBtn.disabled=true;
+    api('/api/send',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({visitor_id:vid,text:text})}).then(function(d){
+      if(d.ok){ inp.value=''; pull(); }
+      else alert(d.error||'发送失败');
+    }).catch(function(){ alert('网络错误'); })
+    .finally(function(){ sendBtn.disabled=false; });
+  }
+  sendBtn.onclick=send;
+  inp.addEventListener('keydown',function(e){ if(e.key==='Enter') send(); });
+
+  // 进入会话
+  api('/api/session',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({visitor_id:vid,name:name})}).then(function(){
+    pull();
+    setInterval(pull, 2500); // 2.5秒轮询
+  });
+})();
+</script>
+</body>
+</html>
