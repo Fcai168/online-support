@@ -17,7 +17,13 @@ function json(data, status = 200) {
   });
 }
 function now() { return new Date().toISOString(); }
-function id() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 8); }
+let _idCounter = 0;
+function id() {
+  // 时间戳前缀 + 自增计数器，保证严格单调递增（同毫秒也不会乱序）
+  const t = Date.now().toString(36);
+  const c = (_idCounter = (_idCounter + 1) % 1679616).toString(36).padStart(4, '0');
+  return t + c;
+}
 
 let _inited = false;
 async function ensureTables(env) {
