@@ -144,6 +144,7 @@
             chatName.textContent=curName;
             msgsEl.innerHTML=''; renderedIds={}; lastAt=0; lastId='';
             pollGen++; // 代次+1，作废旧轮询链
+            loopCurrent(); // 立即启动新会话的轮询拉取
           }
           side.classList.remove('show');
         };
