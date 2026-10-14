@@ -66,6 +66,10 @@
     <button class="send" id="sendBtn">发送</button>
   </div>
 </div>
+<!-- 图片预览弹层 -->
+<div id="lightbox" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.92);z-index:100;align-items:center;justify-content:center;" onclick="this.style.display='none'">
+  <img id="lightboxImg" style="max-width:96%;max-height:96%;object-fit:contain;" alt="预览">
+</div>
 <script>
 (function(){
   var KEY='os_visitor_id', KEY2='os_visitor_name';
@@ -92,7 +96,10 @@
     if(m.image && /^data:image\/(jpeg|png|webp|gif);base64,/.test(m.image)){
       var wrap=document.createElement('div'); wrap.className='bubble img '+cls;
       var img=document.createElement('img'); img.src=m.image; img.alt='图片';
-      img.onclick=function(){ window.open(this.src); };
+      img.onclick=function(){
+        var lb=document.getElementById('lightbox'), lbi=document.getElementById('lightboxImg');
+        lbi.src=this.src; lb.style.display='flex'; // 弹层放大，可长按保存
+      };
       wrap.appendChild(img); msgsEl.appendChild(wrap);
     } else if(m.text){
       var b=document.createElement('div'); b.className='bubble '+cls; b.textContent=m.text;
