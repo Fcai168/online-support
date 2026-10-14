@@ -25,8 +25,9 @@ function id() { return Date.now().toString(36) + Math.random().toString(36).slic
 let _inited = false;
 async function ensureTables(env) {
   if (_inited) return;
-  await env.CHAT_DB.exec(`
-    CREATE TABLE IF NOT EXISTS sessions(
+  // D1 batch: 一次原子提交多条建表语句
+  await env.CHAT_DB.batch([
+    env.CHAT_DB.prepare(`CREATE TABLE IF NOT EXISTS sessions(
       visitor_id TEXT PRIMARY KEY,
       name TEXT,
       created_at TEXT,
@@ -35,16 +36,16 @@ async function ensureTables(env) {
       agent_replied INTEGER DEFAULT 0,
       last_message TEXT DEFAULT '',
       agent_read_at INTEGER DEFAULT 0
-    );
-    CREATE TABLE IF NOT EXISTS messages(
+    )`),
+    env.CHAT_DB.prepare(`CREATE TABLE IF NOT EXISTS messages(
       id TEXT PRIMARY KEY,
       visitor_id TEXT,
       sender TEXT,
       text TEXT,
       at INTEGER
-    );
-    CREATE INDEX IF NOT EXISTS idx_msg_vid ON messages(visitor_id, at);
-  `);
+    )`),
+    env.CHAT_DB.prepare(`CREATE INDEX IF NOT EXISTS idx_msg_vid ON messages(visitor_id, at)`)
+  ]);
   _inited = true;
 }
 
