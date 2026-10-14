@@ -84,14 +84,8 @@ async function getNewMsgs(env, vid, since) {
   ).bind(vid, since || 0).all();
   return (r.results || []).map(mapMsg);
 }
-// 长轮询：有新消息立即返回，否则每秒查一次，最多等 maxMs 毫秒
+// 短轮询：查一次立即返回（不等太久，避免反代/超时问题），由前端高频重连实现接近实时
 async function longPoll(env, vid, since, maxMs) {
-  const start = Date.now();
-  while (Date.now() - start < maxMs) {
-    const msgs = await getNewMsgs(env, vid, since);
-    if (msgs.length > 0) return msgs;
-    await sleep(1000);
-  }
   return await getNewMsgs(env, vid, since);
 }
 

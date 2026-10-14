@@ -94,15 +94,16 @@
     if(m.from==='agent'){ dot.classList.remove('off'); statusText.textContent='在线'; }
   }
 
-  // 长轮询：连服务器，一有新消息立刻收到；返回后立即再连
+  // 轮询：每秒查一次新消息（since 增量），接近实时又稳定
   function loop(){
     if(!polling) return;
     api('/api/messages?visitor_id='+encodeURIComponent(vid)+'&since='+lastAt).then(function(d){
       if(d.messages && d.messages.length){
         d.messages.forEach(function(m){ appendMsg(m); if(m.at>lastAt) lastAt=m.at; });
       }
-      loop(); // 立刻再连，接近实时
-    }).catch(function(){ setTimeout(loop, 2000); });
+    }).catch(function(){}).finally(function(){
+      if(polling) setTimeout(loop, 1000); // 每秒轮询
+    });
   }
 
   // 压缩图片到 dataURL

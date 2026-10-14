@@ -162,13 +162,14 @@
     if(m.at>lastAt) lastAt=m.at;
   }
 
-  // 长轮询当前会话
+  // 轮询当前会话：每秒查一次新消息（since 增量）
   function loopCurrent(){
     if(!curVid) return;
     api('/api/thread?visitor_id='+encodeURIComponent(curVid)+'&since='+lastAt).then(function(d){
       if(d.messages && d.messages.length){ d.messages.forEach(appendMsg); }
-      loopCurrent();
-    }).catch(function(){ setTimeout(loopCurrent, 2000); });
+    }).catch(function(){}).finally(function(){
+      if(curVid) setTimeout(loopCurrent, 1000);
+    });
   }
   function startPolling(){
     loadList();
