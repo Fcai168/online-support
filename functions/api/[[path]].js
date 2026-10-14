@@ -1,9 +1,12 @@
-// 在线客服后端 Worker（Cloudflare Pages Functions）
-// 存储设计：单键存数组，一个会话一条 key，读写各一次，避开 KV list() 每日1000次限制
-// KV 绑定名：CHAT_KV
-// 密钥：ADMIN_KEY（客服台登录口令，通过环境变量设置）
-
-const PREFIX = 'chat:';
+// 在线客服后端 Worker（Cloudflare Pages Functions）—— D1 数据库版
+// 存储：D1（写完立即可读，无 KV 同步延迟，解决"不稳定"）
+// 绑定名：CHAT_DB（D1 数据库）
+// 密钥：ADMIN_KEY（环境变量）
+//
+// 表结构（首次自动初始化）：
+//   sessions(visitor_id TEXT PRIMARY KEY, name, created_at, last_active,
+//            unread_for_agent INT, agent_replied INT, last_message TEXT, agent_read_at INT)
+//   messages(id TEXT PRIMARY KEY, visitor_id, sender TEXT, text TEXT, at INT)
 
 function json(data, status = 200) {
   return new Response(JSON.stringify(data), {
@@ -16,43 +19,63 @@ function json(data, status = 200) {
     }
   });
 }
-
 function now() { return new Date().toISOString(); }
 function id() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 8); }
 
-// ============ 会话存储 ============
-// 一条会话 = { visitor_id, name, last_message, last_active, unread_for_agent, agent_replied, last_from_agent }
-async function getSession(env, vid) {
-  return await env.CHAT_KV.get(PREFIX + 'session:' + vid, { type: 'json' });
-}
-async function putSession(env, vid, s) {
-  await env.CHAT_KV.put(PREFIX + 'session:' + vid, JSON.stringify(s));
-}
-// 消息 = { vid, msgs:[{id,from,text,at}], agentReadAt }
-async function getThread(env, vid) {
-  return await env.CHAT_KV.get(PREFIX + 'thread:' + vid, { type: 'json' }) || { msgs: [], agentReadAt: 0 };
-}
-async function putThread(env, vid, t) {
-  await env.CHAT_KV.put(PREFIX + 'thread:' + vid, JSON.stringify(t));
-}
-async function listVisitors(env) {
-  // 仅列出会话索引（避免全量读消息体）——用一个汇总 key 记录所有 vid
-  let idx = await env.CHAT_KV.get(PREFIX + 'visitors', { type: 'json' }) || [];
-  return idx;
-}
-async function addVisitor(env, vid, meta) {
-  let idx = await listVisitors(env);
-  let found = idx.find(x => x.visitor_id === vid);
-  if (!found) {
-    found = { visitor_id: vid, ...meta };
-    idx.push(found);
-  } else {
-    Object.assign(found, meta);
-  }
-  await env.CHAT_KV.put(PREFIX + 'visitors', JSON.stringify(idx));
+let _inited = false;
+async function ensureTables(env) {
+  if (_inited) return;
+  await env.CHAT_DB.exec(`
+    CREATE TABLE IF NOT EXISTS sessions(
+      visitor_id TEXT PRIMARY KEY,
+      name TEXT,
+      created_at TEXT,
+      last_active TEXT,
+      unread_for_agent INTEGER DEFAULT 0,
+      agent_replied INTEGER DEFAULT 0,
+      last_message TEXT DEFAULT '',
+      agent_read_at INTEGER DEFAULT 0
+    );
+    CREATE TABLE IF NOT EXISTS messages(
+      id TEXT PRIMARY KEY,
+      visitor_id TEXT,
+      sender TEXT,
+      text TEXT,
+      at INTEGER
+    );
+    CREATE INDEX IF NOT EXISTS idx_msg_vid ON messages(visitor_id, at);
+  `);
+  _inited = true;
 }
 
-// ============ 校验 ============
+async function getSession(env, vid) {
+  const r = await env.CHAT_DB.prepare('SELECT * FROM sessions WHERE visitor_id = ?').bind(vid).first();
+  return r || null;
+}
+async function touchVisitor(env, vid, s) {
+  await env.CHAT_DB.prepare(
+    `INSERT INTO sessions(visitor_id,name,created_at,last_active,unread_for_agent,agent_replied,last_message,agent_read_at)
+     VALUES(?,?,?,?,?,?,?,?)
+     ON CONFLICT(visitor_id) DO UPDATE SET
+       name=excluded.name, last_active=excluded.last_active,
+       unread_for_agent=excluded.unread_for_agent, agent_replied=excluded.agent_replied,
+       last_message=excluded.last_message, agent_read_at=excluded.agent_read_at`
+  ).bind(vid, s.name, s.created_at, s.last_active, s.unread_for_agent||0, s.agent_replied?1:0, s.last_message||'', s.agent_read_at||0).run();
+}
+async function addMsg(env, vid, msg) {
+  await env.CHAT_DB.prepare('INSERT INTO messages(id,visitor_id,sender,text,at) VALUES(?,?,?,?,?)')
+    .bind(msg.id, vid, msg.sender, msg.text, msg.at).run();
+  // 防爆：只保留最近500条
+  await env.CHAT_DB.prepare(
+    `DELETE FROM messages WHERE visitor_id=? AND id NOT IN
+     (SELECT id FROM messages WHERE visitor_id=? ORDER BY at DESC LIMIT 500)`
+  ).bind(vid, vid).run();
+}
+async function getMsgs(env, vid) {
+  const r = await env.CHAT_DB.prepare('SELECT id,sender,text,at FROM messages WHERE visitor_id=? ORDER BY at ASC').bind(vid).all();
+  return (r.results || []).map(m => ({ id: m.id, from: m.sender, text: m.text, at: m.at }));
+}
+
 function checkAdmin(request, env) {
   const key = request.headers.get('x-admin-key') || '';
   if (!env.ADMIN_KEY) return { ok: false, msg: '服务端未配置 ADMIN_KEY' };
@@ -63,7 +86,6 @@ function validText(t, max = 2000) {
   return typeof t === 'string' && t.trim().length > 0 && t.length <= max;
 }
 
-// ============ 主入口：按路由分派 ============
 export async function onRequest(context) {
   const { request, env } = context;
   const url = new URL(request.url);
@@ -76,7 +98,9 @@ export async function onRequest(context) {
   }});
 
   try {
-    // ---- 客户：创建/进入会话（携带昵称） ----
+    await ensureTables(env);
+
+    // ---- 客户：创建/进入会话 ----
     if (path === '/session' && request.method === 'POST') {
       const body = await request.json().catch(() => ({}));
       let vid = body.visitor_id;
@@ -85,11 +109,10 @@ export async function onRequest(context) {
       let s = await getSession(env, vid);
       if (!s) {
         s = { visitor_id: vid, name, created_at: now(), last_active: now(),
-              unread_for_agent: 0, agent_replied: false, last_from_agent: 0, last_message: '' };
-        await addVisitor(env, vid, { visitor_id: vid, name, created_at: s.created_at });
+              unread_for_agent: 0, agent_replied: 0, last_message: '', agent_read_at: 0 };
+        await touchVisitor(env, vid, s);
       }
-      await putSession(env, vid, s);
-      return json({ visitor_id: vid, name: s.name, agent_replied: s.agent_replied });
+      return json({ visitor_id: vid, name: s.name, agent_replied: !!s.agent_replied });
     }
 
     // ---- 客户：发消息 ----
@@ -103,60 +126,52 @@ export async function onRequest(context) {
       let s = await getSession(env, visitor_id);
       if (!s) return json({ error: '会话不存在，请先 /api/session 创建' }, 404);
 
-      let t = await getThread(env, visitor_id);
-      const msg = { id: 'm' + id(), from: 'visitor', text: text.trim().slice(0, 2000), at: Date.now() };
-      t.msgs.push(msg);
-      if (t.msgs.length > 500) t.msgs = t.msgs.slice(-500); // 防爆
-      await putThread(env, visitor_id, t);
-
+      const msg = { id: 'm' + id(), sender: 'visitor', text: text.trim().slice(0, 2000), at: Date.now() };
+      await addMsg(env, visitor_id, msg);
       s.last_active = now();
       s.last_message = msg.text.slice(0, 60);
       s.unread_for_agent = (s.unread_for_agent || 0) + 1;
-      await putSession(env, visitor_id, s);
-      await addVisitor(env, visitor_id, { visitor_id, last_message: s.last_message, last_active: s.last_active });
-      return json({ ok: true, msg });
+      await touchVisitor(env, visitor_id, s);
+      return json({ ok: true, msg: { id: msg.id, from: 'visitor', text: msg.text, at: msg.at } });
     }
 
     // ---- 客户：拉取本会话消息 ----
     if (path === '/messages' && request.method === 'GET') {
       const vid = url.searchParams.get('visitor_id');
       if (!vid) return json({ error: '缺少 visitor_id' }, 400);
-      const t = await getThread(env, vid);
-      return json({ messages: t.msgs, agentReadAt: t.agentReadAt || 0 });
+      const msgs = await getMsgs(env, vid);
+      return json({ messages: msgs });
     }
 
-    // ---- 客服：访客列表（按最近活跃排序） ----
+    // ---- 客服：访客列表 ----
     if (path === '/visitors' && request.method === 'GET') {
       if (!checkAdmin(request, env).ok) return json({ error: '未授权' }, 401);
-      let idx = await listVisitors(env);
-      const sessions = await Promise.all(idx.map(async v => {
-        const s = await getSession(env, v.visitor_id);
-        return s ? { visitor_id: s.visitor_id, name: s.name, last_message: s.last_message,
-                     last_active: s.last_active, unread_for_agent: s.unread_for_agent || 0,
-                     agent_replied: s.agent_replied } : null;
+      const r = await env.CHAT_DB.prepare(
+        'SELECT visitor_id,name,last_message,last_active,unread_for_agent,agent_replied FROM sessions ORDER BY last_active DESC LIMIT 200'
+      ).all();
+      const list = (r.results || []).map(s => ({
+        visitor_id: s.visitor_id, name: s.name, last_message: s.last_message,
+        last_active: s.last_active, unread_for_agent: s.unread_for_agent || 0, agent_replied: !!s.agent_replied
       }));
-      const list = sessions.filter(Boolean).sort((a, b) => new Date(b.last_active) - new Date(a.last_active));
       return json({ visitors: list });
     }
 
-    // ---- 客服：拉取某访客的消息（并标记已读） ----
+    // ---- 客服：拉取某访客消息（标记已读） ----
     if (path === '/thread' && request.method === 'GET') {
       if (!checkAdmin(request, env).ok) return json({ error: '未授权' }, 401);
       const vid = url.searchParams.get('visitor_id');
       if (!vid) return json({ error: '缺少 visitor_id' }, 400);
       const s = await getSession(env, vid);
-      const t = await getThread(env, vid);
-      // 标记客服已读
-      t.agentReadAt = Date.now();
-      await putThread(env, vid, t);
-      if (s && s.unread_for_agent) {
+      const msgs = await getMsgs(env, vid);
+      if (s && (s.unread_for_agent || 0) > 0) {
         s.unread_for_agent = 0;
-        await putSession(env, vid, s);
+        s.agent_read_at = Date.now();
+        await touchVisitor(env, vid, s);
       }
-      return json({ name: s ? s.name : '未知', messages: t.msgs });
+      return json({ name: s ? s.name : '未知', messages: msgs });
     }
 
-    // ---- 客服：回复消息 ----
+    // ---- 客服：回复 ----
     if (path === '/reply' && request.method === 'POST') {
       if (!checkAdmin(request, env).ok) return json({ error: '未授权' }, 401);
       const body = await request.json().catch(() => ({}));
@@ -168,29 +183,22 @@ export async function onRequest(context) {
       let s = await getSession(env, visitor_id);
       if (!s) return json({ error: '会话不存在' }, 404);
 
-      let t = await getThread(env, visitor_id);
-      const msg = { id: 'm' + id(), from: 'agent', text: text.trim().slice(0, 2000), at: Date.now() };
-      t.msgs.push(msg);
-      t.agentReadAt = Date.now();
-      if (t.msgs.length > 500) t.msgs = t.msgs.slice(-500);
-      await putThread(env, visitor_id, t);
-
+      const msg = { id: 'm' + id(), sender: 'agent', text: text.trim().slice(0, 2000), at: Date.now() };
+      await addMsg(env, visitor_id, msg);
       s.last_active = now();
       s.last_message = msg.text.slice(0, 60);
-      s.agent_replied = true;
-      s.last_from_agent = msg.at;
-      await putSession(env, visitor_id, s);
-      await addVisitor(env, visitor_id, { visitor_id, last_message: s.last_message, last_active: s.last_active });
-      return json({ ok: true, msg });
+      s.agent_replied = 1;
+      s.agent_read_at = msg.at;
+      await touchVisitor(env, visitor_id, s);
+      return json({ ok: true, msg: { id: msg.id, from: 'agent', text: msg.text, at: msg.at } });
     }
 
-    // ---- 客服：修改口令 ----
+    // ---- 客服：修改口令提示 ----
     if (path === '/password' && request.method === 'POST') {
       if (!checkAdmin(request, env).ok) return json({ error: '未授权' }, 401);
       const body = await request.json().catch(() => ({}));
       const np = body.new_password;
       if (!np || String(np).length < 6) return json({ error: '新口令至少6位' }, 400);
-      // 口令实际存在环境变量里，这里仅提示通过 Cloudflare 后台修改更安全
       return json({ ok: true, hint: '口令请通过 Cloudflare 环境变量 ADMIN_KEY 修改后重新部署' });
     }
 
