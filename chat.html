@@ -25,15 +25,21 @@
   @keyframes pop { from{opacity:0; transform:translateY(4px);} to{opacity:1;} }
   .them { background:var(--them); align-self:flex-start; border-bottom-left-radius:4px; box-shadow:0 1px 2px rgba(0,0,0,.06); }
   .me { background:var(--me); color:#fff; align-self:flex-end; border-bottom-right-radius:4px; }
+  .bubble.img { padding:5px; }
+  .bubble img { display:block; max-width:100%; border-radius:12px; cursor:pointer; }
   .time { align-self:center; font-size:11px; color:#94a3b8; }
-  .inputbar { display:flex; gap:8px; padding:10px; border-top:1px solid #e2e8f0; background:#fff; }
-  .inputbar input { flex:1; border:1px solid #e2e8f0; background:#f8fafc; border-radius:22px;
+  .inputbar { display:flex; gap:8px; padding:10px; border-top:1px solid #e2e8f0; background:#fff; align-items:center; }
+  .imgbtn { flex-shrink:0; width:40px; height:40px; border-radius:50%; border:none; background:#e0e7ff;
+    font-size:19px; cursor:pointer; }
+  .imgbtn:active { background:#c7d2fe; }
+  .inputbar input { flex:1; min-width:0; border:1px solid #e2e8f0; background:#f8fafc; border-radius:22px;
     padding:10px 16px; font-size:15px; outline:none; }
   .inputbar input:focus { border-color:var(--brand); }
-  .send { background:var(--brand); color:#fff; border:none; border-radius:22px;
-    padding:0 20px; font-size:15px; cursor:pointer; }
+  .send { flex-shrink:0; background:var(--brand); color:#fff; border:none; border-radius:22px;
+    padding:0 18px; height:40px; font-size:15px; cursor:pointer; }
   .send:active { opacity:.85; }
   .intro { text-align:center; color:#94a3b8; font-size:13px; padding:20px 10px 0; }
+  #imgInput { display:none; }
 </style>
 </head>
 <body>
@@ -49,13 +55,14 @@
     <div class="intro">您好，很高兴为您服务 😊<br>请直接输入您的问题</div>
   </div>
   <div class="inputbar">
+    <button class="imgbtn" id="imgBtn" title="发图片">📷</button>
+    <input id="imgInput" type="file" accept="image/*">
     <input id="inp" type="text" placeholder="输入消息..." maxlength="2000" autocomplete="off">
     <button class="send" id="sendBtn">发送</button>
   </div>
 </div>
 <script>
 (function(){
-  // 跨设备 visitor_id：存 localStorage，同一浏览器同一访客
   var KEY='os_visitor_id', KEY2='os_visitor_name';
   var vid = localStorage.getItem(KEY);
   var name = localStorage.getItem(KEY2);
@@ -63,45 +70,78 @@
     localStorage.setItem(KEY,vid); localStorage.setItem(KEY2,name||''); }
   var msgsEl=document.getElementById('msgs'), inp=document.getElementById('inp'),
       sendBtn=document.getElementById('sendBtn'), dot=document.getElementById('dot'),
-      statusText=document.getElementById('statusText');
-  var lastCount=0, agentReplied=false;
+      statusText=document.getElementById('statusText'),
+      imgBtn=document.getElementById('imgBtn'), imgInput=document.getElementById('imgInput');
+  var renderedIds={}, lastAt=0, polling=true;
 
   function api(u,opt){ return fetch(u,opt).then(function(r){return r.json();}); }
   function scrollBottom(){ msgsEl.scrollTop=msgsEl.scrollHeight; }
   function fmtTime(ts){ var d=new Date(ts); return (d.getHours()<10?'0':'')+d.getHours()+':'+(d.getMinutes()<10?'0':'')+d.getMinutes(); }
   function esc(s){ var d=document.createElement('div'); d.textContent=s; return d.innerHTML; }
 
-  function render(msgs){
-    var out='<div class="intro">您好，很高兴为您服务 😊<br>请直接输入您的问题</div>';
-    var lastDay='';
-    msgs.forEach(function(m){
-      var cls = m.from==='visitor' ? 'me' : 'them';
-      out += '<div class="bubble '+cls+'">'+esc(m.text)+'</div>';
-      out += '<div class="time">'+fmtTime(m.at)+'</div>';
-    });
-    msgsEl.innerHTML=out;
+  function appendMsg(m){
+    if(renderedIds[m.id]) return;
+    renderedIds[m.id]=true;
+    var cls = m.from==='visitor' ? 'me' : 'them';
+    var html;
+    if(m.image){ html='<div class="bubble img '+cls+'"><img src="'+m.image+'" onclick="window.open(this.src)"></div>'; }
+    else if(m.text){ html='<div class="bubble '+cls+'">'+esc(m.text)+'</div>'; }
+    else return;
+    msgsEl.insertAdjacentHTML('beforeend', html+'<div class="time">'+fmtTime(m.at)+'</div>');
     scrollBottom();
+    var nearBottom = msgsEl.scrollHeight - msgsEl.scrollTop - msgsEl.clientHeight < 120;
+    if(nearBottom) scrollBottom();
+    if(m.from==='agent'){ dot.classList.remove('off'); statusText.textContent='在线'; }
   }
 
-  function pull(){
-    api('/api/messages?visitor_id='+encodeURIComponent(vid)).then(function(d){
-      if(d.messages){
-        var changed = d.messages.length!==lastCount;
-        render(d.messages);
-        lastCount=d.messages.length;
-        // 在线状态：最近有客服回复则视为在线
-        var last=d.messages[d.messages.length-1];
-        if(last && last.from==='agent'){ dot.classList.remove('off'); statusText.textContent='在线'; }
+  // 长轮询：连服务器，一有新消息立刻收到；返回后立即再连
+  function loop(){
+    if(!polling) return;
+    api('/api/messages?visitor_id='+encodeURIComponent(vid)+'&since='+lastAt).then(function(d){
+      if(d.messages && d.messages.length){
+        d.messages.forEach(function(m){ appendMsg(m); if(m.at>lastAt) lastAt=m.at; });
       }
-    }).catch(function(){});
+      loop(); // 立刻再连，接近实时
+    }).catch(function(){ setTimeout(loop, 2000); });
   }
+
+  // 压缩图片到 dataURL
+  function compressImage(file, cb){
+    var reader=new FileReader();
+    reader.onload=function(e){
+      var img=new Image();
+      img.onload=function(){
+        var max=1000, w=img.width, h=img.height;
+        if(w>max||h>max){ if(w>h){ h=h*max/w; w=max; } else { w=w*max/h; h=max; } }
+        var c=document.createElement('canvas'); c.width=w; c.height=h;
+        c.getContext('2d').drawImage(img,0,0,w,h);
+        cb(c.toDataURL('image/jpeg',0.75));
+      };
+      img.src=e.target.result;
+    };
+    reader.readAsDataURL(file);
+  }
+  function sendImage(dataUrl){
+    sendBtn.disabled=true;
+    api('/api/send',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({visitor_id:vid, image:dataUrl})}).then(function(d){
+      if(d.ok){ if(d.msg) appendMsg({id:d.msg.id,from:'visitor',text:d.msg.text,at:d.msg.at,image:d.msg.image}), (d.msg.at>lastAt&&(lastAt=d.msg.at)); }
+      else alert(d.error||'发送失败');
+    }).catch(function(){ alert('网络错误'); })
+    .finally(function(){ sendBtn.disabled=false; });
+  }
+  imgBtn.onclick=function(){ imgInput.click(); };
+  imgInput.onchange=function(){
+    var f=imgInput.files[0]; if(!f) return; imgInput.value='';
+    compressImage(f, sendImage);
+  };
 
   function send(){
     var text=inp.value.trim(); if(!text) return;
     sendBtn.disabled=true;
     api('/api/send',{method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({visitor_id:vid,text:text})}).then(function(d){
-      if(d.ok){ inp.value=''; pull(); }
+      if(d.ok){ inp.value=''; if(d.msg){ appendMsg({id:d.msg.id,from:'visitor',text:d.msg.text,at:d.msg.at}); if(d.msg.at>lastAt)lastAt=d.msg.at; } }
       else alert(d.error||'发送失败');
     }).catch(function(){ alert('网络错误'); })
     .finally(function(){ sendBtn.disabled=false; });
@@ -109,11 +149,9 @@
   sendBtn.onclick=send;
   inp.addEventListener('keydown',function(e){ if(e.key==='Enter') send(); });
 
-  // 进入会话
   api('/api/session',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({visitor_id:vid,name:name})}).then(function(){
-    pull();
-    setInterval(pull, 2500); // 2.5秒轮询
+      loop(); // 长轮询实时接收
   });
 })();
 </script>

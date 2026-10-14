@@ -1,12 +1,8 @@
-// 在线客服后端 Worker（Cloudflare Pages Functions）—— D1 数据库版
-// 存储：D1（写完立即可读，无 KV 同步延迟，解决"不稳定"）
-// 绑定名：CHAT_DB（D1 数据库）
+// 在线客服后端 Worker（Cloudflare Pages Functions）—— D1 + 实时长轮询 + 图片
+// 存储：D1（写完立即可读）；实时：long-polling（有新消息立即返回，接近实时）
+// 绑定名：CHAT_DB（D1）
 // 密钥：ADMIN_KEY（环境变量）
-//
-// 表结构（首次自动初始化）：
-//   sessions(visitor_id TEXT PRIMARY KEY, name, created_at, last_active,
-//            unread_for_agent INT, agent_replied INT, last_message TEXT, agent_read_at INT)
-//   messages(id TEXT PRIMARY KEY, visitor_id, sender TEXT, text TEXT, at INT)
+// 表：sessions(...) / messages(id PK, visitor_id, sender, text, at, image)
 
 function json(data, status = 200) {
   return new Response(JSON.stringify(data), {
@@ -15,17 +11,18 @@ function json(data, status = 200) {
       'Content-Type': 'application/json; charset=utf-8',
       'Access-Control-Allow-Origin': '*',
       'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
-      'Access-Control-Allow-Headers': 'Content-Type, x-admin-key'
+      'Access-Control-Allow-Headers': 'Content-Type, x-admin-key',
+      'Cache-Control': 'no-store'
     }
   });
 }
 function now() { return new Date().toISOString(); }
 function id() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 8); }
+const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 let _inited = false;
 async function ensureTables(env) {
   if (_inited) return;
-  // D1 batch: 一次原子提交多条建表语句
   await env.CHAT_DB.batch([
     env.CHAT_DB.prepare(`CREATE TABLE IF NOT EXISTS sessions(
       visitor_id TEXT PRIMARY KEY,
@@ -42,10 +39,17 @@ async function ensureTables(env) {
       visitor_id TEXT,
       sender TEXT,
       text TEXT,
-      at INTEGER
+      at INTEGER,
+      image TEXT
     )`),
     env.CHAT_DB.prepare(`CREATE INDEX IF NOT EXISTS idx_msg_vid ON messages(visitor_id, at)`)
   ]);
+  // 迁移：老表若无 image 列则补上
+  const info = await env.CHAT_DB.prepare('PRAGMA table_info(messages)').all();
+  const cols = (info.results || []).map(c => c.name);
+  if (!cols.includes('image')) {
+    await env.CHAT_DB.prepare('ALTER TABLE messages ADD COLUMN image TEXT').run();
+  }
   _inited = true;
 }
 
@@ -64,17 +68,31 @@ async function touchVisitor(env, vid, s) {
   ).bind(vid, s.name, s.created_at, s.last_active, s.unread_for_agent||0, s.agent_replied?1:0, s.last_message||'', s.agent_read_at||0).run();
 }
 async function addMsg(env, vid, msg) {
-  await env.CHAT_DB.prepare('INSERT INTO messages(id,visitor_id,sender,text,at) VALUES(?,?,?,?,?)')
-    .bind(msg.id, vid, msg.sender, msg.text, msg.at).run();
-  // 防爆：只保留最近500条
+  await env.CHAT_DB.prepare('INSERT INTO messages(id,visitor_id,sender,text,at,image) VALUES(?,?,?,?,?,?)')
+    .bind(msg.id, vid, msg.sender, msg.text, msg.at, msg.image || null).run();
   await env.CHAT_DB.prepare(
     `DELETE FROM messages WHERE visitor_id=? AND id NOT IN
      (SELECT id FROM messages WHERE visitor_id=? ORDER BY at DESC LIMIT 500)`
   ).bind(vid, vid).run();
 }
-async function getMsgs(env, vid) {
-  const r = await env.CHAT_DB.prepare('SELECT id,sender,text,at FROM messages WHERE visitor_id=? ORDER BY at ASC').bind(vid).all();
-  return (r.results || []).map(m => ({ id: m.id, from: m.sender, text: m.text, at: m.at }));
+function mapMsg(m) {
+  return { id: m.id, from: m.sender, text: m.text, at: m.at, image: m.image || null };
+}
+async function getNewMsgs(env, vid, since) {
+  const r = await env.CHAT_DB.prepare(
+    'SELECT id,sender,text,at,image FROM messages WHERE visitor_id=? AND at>? ORDER BY at ASC'
+  ).bind(vid, since || 0).all();
+  return (r.results || []).map(mapMsg);
+}
+// 长轮询：有新消息立即返回，否则每秒查一次，最多等 maxMs 毫秒
+async function longPoll(env, vid, since, maxMs) {
+  const start = Date.now();
+  while (Date.now() - start < maxMs) {
+    const msgs = await getNewMsgs(env, vid, since);
+    if (msgs.length > 0) return msgs;
+    await sleep(1000);
+  }
+  return await getNewMsgs(env, vid, since);
 }
 
 function checkAdmin(request, env) {
@@ -83,8 +101,13 @@ function checkAdmin(request, env) {
   if (key !== env.ADMIN_KEY) return { ok: false, msg: '口令错误' };
   return { ok: true };
 }
-function validText(t, max = 2000) {
-  return typeof t === 'string' && t.trim().length > 0 && t.length <= max;
+function validMsg(text, image) {
+  const hasText = typeof text === 'string' && text.trim().length > 0;
+  const hasImg = typeof image === 'string' && image.length > 0;
+  if (!hasText && !hasImg) return false;
+  if (hasText && text.length > 2000) return false;
+  if (hasImg && image.length > 2000000) return false;
+  return true;
 }
 
 export async function onRequest(context) {
@@ -116,31 +139,34 @@ export async function onRequest(context) {
       return json({ visitor_id: vid, name: s.name, agent_replied: !!s.agent_replied });
     }
 
-    // ---- 客户：发消息 ----
+    // ---- 客户：发消息（文字/图片） ----
     if (path === '/send' && request.method === 'POST') {
       const body = await request.json().catch(() => ({}));
-      const { visitor_id } = body;
+      const { visitor_id, image } = body;
       const text = body.text;
       if (!visitor_id) return json({ error: '缺少 visitor_id' }, 400);
-      if (!validText(text)) return json({ error: '消息内容不合法' }, 400);
+      if (!validMsg(text, image)) return json({ error: '消息内容不合法' }, 400);
 
       let s = await getSession(env, visitor_id);
       if (!s) return json({ error: '会话不存在，请先 /api/session 创建' }, 404);
 
-      const msg = { id: 'm' + id(), sender: 'visitor', text: text.trim().slice(0, 2000), at: Date.now() };
+      const msg = { id: 'm' + id(), sender: 'visitor',
+        text: (typeof text === 'string' && text.trim()) ? text.trim().slice(0, 2000) : '',
+        at: Date.now(), image: image || null };
       await addMsg(env, visitor_id, msg);
       s.last_active = now();
-      s.last_message = msg.text.slice(0, 60);
+      s.last_message = msg.text ? msg.text.slice(0, 60) : '[图片]';
       s.unread_for_agent = (s.unread_for_agent || 0) + 1;
       await touchVisitor(env, visitor_id, s);
-      return json({ ok: true, msg: { id: msg.id, from: 'visitor', text: msg.text, at: msg.at } });
+      return json({ ok: true, msg: { id: msg.id, from: 'visitor', text: msg.text, at: msg.at, image: msg.image } });
     }
 
-    // ---- 客户：拉取本会话消息 ----
+    // ---- 拉取新消息（长轮询，接近实时） ----
     if (path === '/messages' && request.method === 'GET') {
       const vid = url.searchParams.get('visitor_id');
+      const since = parseInt(url.searchParams.get('since') || '0', 10);
       if (!vid) return json({ error: '缺少 visitor_id' }, 400);
-      const msgs = await getMsgs(env, vid);
+      const msgs = await longPoll(env, vid, since, 18000);
       return json({ messages: msgs });
     }
 
@@ -157,14 +183,15 @@ export async function onRequest(context) {
       return json({ visitors: list });
     }
 
-    // ---- 客服：拉取某访客消息（标记已读） ----
+    // ---- 客服：拉取某访客消息（长轮询 + 标记已读） ----
     if (path === '/thread' && request.method === 'GET') {
       if (!checkAdmin(request, env).ok) return json({ error: '未授权' }, 401);
       const vid = url.searchParams.get('visitor_id');
       if (!vid) return json({ error: '缺少 visitor_id' }, 400);
+      const since = parseInt(url.searchParams.get('since') || '0', 10);
       const s = await getSession(env, vid);
-      const msgs = await getMsgs(env, vid);
-      if (s && (s.unread_for_agent || 0) > 0) {
+      const msgs = await longPoll(env, vid, since, 18000);
+      if (msgs.length > 0 && s && (s.unread_for_agent || 0) > 0) {
         s.unread_for_agent = 0;
         s.agent_read_at = Date.now();
         await touchVisitor(env, vid, s);
@@ -172,26 +199,28 @@ export async function onRequest(context) {
       return json({ name: s ? s.name : '未知', messages: msgs });
     }
 
-    // ---- 客服：回复 ----
+    // ---- 客服：回复（文字/图片） ----
     if (path === '/reply' && request.method === 'POST') {
       if (!checkAdmin(request, env).ok) return json({ error: '未授权' }, 401);
       const body = await request.json().catch(() => ({}));
-      const { visitor_id } = body;
+      const { visitor_id, image } = body;
       const text = body.text;
       if (!visitor_id) return json({ error: '缺少 visitor_id' }, 400);
-      if (!validText(text)) return json({ error: '消息内容不合法' }, 400);
+      if (!validMsg(text, image)) return json({ error: '消息内容不合法' }, 400);
 
       let s = await getSession(env, visitor_id);
       if (!s) return json({ error: '会话不存在' }, 404);
 
-      const msg = { id: 'm' + id(), sender: 'agent', text: text.trim().slice(0, 2000), at: Date.now() };
+      const msg = { id: 'm' + id(), sender: 'agent',
+        text: (typeof text === 'string' && text.trim()) ? text.trim().slice(0, 2000) : '',
+        at: Date.now(), image: image || null };
       await addMsg(env, visitor_id, msg);
       s.last_active = now();
-      s.last_message = msg.text.slice(0, 60);
+      s.last_message = msg.text ? msg.text.slice(0, 60) : '[图片]';
       s.agent_replied = 1;
       s.agent_read_at = msg.at;
       await touchVisitor(env, visitor_id, s);
-      return json({ ok: true, msg: { id: msg.id, from: 'agent', text: msg.text, at: msg.at } });
+      return json({ ok: true, msg: { id: msg.id, from: 'agent', text: msg.text, at: msg.at, image: msg.image } });
     }
 
     // ---- 客服：修改口令提示 ----

@@ -36,12 +36,15 @@
   .bubble { max-width:70%; padding:10px 14px; border-radius:16px; font-size:15px; line-height:1.5; word-break:break-word; white-space:pre-wrap; }
   .them { background:#fff; align-self:flex-start; border-bottom-left-radius:4px; box-shadow:0 1px 2px rgba(0,0,0,.06); }
   .me { background:#3b82f6; color:#fff; align-self:flex-end; border-bottom-right-radius:4px; }
+  .bubble.img { padding:5px; }
+  .bubble img { display:block; max-width:100%; border-radius:12px; cursor:pointer; }
   .time { align-self:center; font-size:11px; color:#94a3b8; }
   .placeholder { margin:auto; color:#94a3b8; text-align:center; }
-  .inputbar { display:flex; gap:8px; padding:10px; background:#fff; border-top:1px solid #e2e8f0; }
-  .inputbar input { flex:1; border:1px solid #e2e8f0; background:#f8fafc; border-radius:22px; padding:10px 16px; font-size:15px; outline:none; }
+  .inputbar { display:flex; gap:8px; padding:10px; background:#fff; border-top:1px solid #e2e8f0; align-items:center; }
+  .imgbtn { flex-shrink:0; width:40px; height:40px; border-radius:50%; border:none; background:#e0e7ff; font-size:19px; cursor:pointer; }
+  .inputbar input { flex:1; min-width:0; border:1px solid #e2e8f0; background:#f8fafc; border-radius:22px; padding:10px 16px; font-size:15px; outline:none; }
   .inputbar input:focus { border-color:#3b82f6; }
-  .send { background:#3b82f6; color:#fff; border:none; border-radius:22px; padding:0 22px; font-size:15px; cursor:pointer; }
+  .send { flex-shrink:0; background:#3b82f6; color:#fff; border:none; border-radius:22px; padding:0 20px; height:40px; font-size:15px; cursor:pointer; }
   .send:active{ opacity:.85; }
   /* 登录遮罩 */
   .login { position:fixed; inset:0; background:rgba(15,23,42,.6); display:flex; align-items:center; justify-content:center; z-index:50; }
@@ -50,6 +53,7 @@
   .login input { width:100%; border:1px solid #e2e8f0; border-radius:10px; padding:12px 14px; font-size:15px; outline:none; margin-bottom:12px; }
   .login button { width:100%; background:#3b82f6; color:#fff; border:none; border-radius:10px; padding:12px; font-size:16px; cursor:pointer; }
   .login .err { color:#ef4444; font-size:13px; margin-top:10px; min-height:18px; }
+  #imgInput { display:none; }
 </style>
 </head>
 <body>
@@ -75,6 +79,8 @@
     </div>
     <div class="msgs" id="msgs"><div class="placeholder">从左侧选择一个客户开始对话</div></div>
     <div class="inputbar">
+      <button class="imgbtn" id="imgBtn" title="发图片">📷</button>
+      <input id="imgInput" type="file" accept="image/*">
       <input id="inp" type="text" placeholder="输入回复..." maxlength="2000" autocomplete="off">
       <button class="send" id="sendBtn">发送</button>
     </div>
@@ -83,11 +89,12 @@
 <script>
 (function(){
   var AKEY = sessionStorage.getItem('os_admin_key') || '';
-  var curVid=null, curName='', lastCount=0;
+  var curVid=null, curName='', renderedIds={}, lastAt=0;
   var vlist=document.getElementById('vlist'), msgsEl=document.getElementById('msgs'),
       inp=document.getElementById('inp'), sendBtn=document.getElementById('sendBtn'),
       chatName=document.getElementById('chatName'), side=document.getElementById('side'),
-      login=document.getElementById('login');
+      login=document.getElementById('login'),
+      imgBtn=document.getElementById('imgBtn'), imgInput=document.getElementById('imgInput');
 
   function api(u,opt){
     opt=opt||{}; opt.headers=Object.assign({'x-admin-key':AKEY}, opt.headers||{});
@@ -115,7 +122,7 @@
   // 拉会话列表
   function loadList(){
     api('/api/visitors').then(function(d){
-      if(!d.visitors){ return; }
+      if(!d.visitors) return;
       if(d.visitors.length===0){ vlist.innerHTML='<div class="empty">暂无会话</div>'; return; }
       vlist.innerHTML=d.visitors.map(function(v){
         var unread = v.unread_for_agent>0 ? '<span class="badge">'+v.unread_for_agent+'</span>' : '';
@@ -127,57 +134,89 @@
       }).join('');
       Array.prototype.forEach.call(vlist.querySelectorAll('.vitem'),function(el){
         el.onclick=function(){
-          curVid=el.getAttribute('data-vid');
-          curName=el.getAttribute('data-name');
-          chatName.textContent=curName;
+          var newVid=el.getAttribute('data-vid');
+          if(newVid!==curVid){
+            curVid=newVid; curName=el.getAttribute('data-name');
+            chatName.textContent=curName;
+            msgsEl.innerHTML=''; renderedIds={}; lastAt=0; // 切换会话重置
+          }
           side.classList.remove('show');
-          openThread();
         };
       });
     }).catch(function(){});
   }
 
-  // 拉当前会话消息
-  function openThread(){
-    api('/api/thread?visitor_id='+encodeURIComponent(curVid)).then(function(d){
-      render(d.messages||[]);
-      lastCount=(d.messages||[]).length;
-    }).catch(function(){});
+  // 追加一条消息
+  function appendMsg(m){
+    if(renderedIds[m.id]) return;
+    renderedIds[m.id]=true;
+    if(msgsEl.querySelector('.placeholder')) msgsEl.innerHTML='';
+    var cls=m.from==='agent'?'me':'them';
+    var html;
+    if(m.image){ html='<div class="bubble img '+cls+'"><img src="'+m.image+'" onclick="window.open(this.src)"></div>'; }
+    else if(m.text){ html='<div class="bubble '+cls+'">'+esc(m.text)+'</div>'; }
+    else return;
+    msgsEl.insertAdjacentHTML('beforeend', html+'<div class="time">'+fmtTime(m.at)+'</div>');
+    var nearBottom = msgsEl.scrollHeight - msgsEl.scrollTop - msgsEl.clientHeight < 150;
+    if(nearBottom) scrollBottom();
+    if(m.at>lastAt) lastAt=m.at;
   }
-  function render(msgs){
-    msgsEl.innerHTML=msgs.map(function(m){
-      var cls=m.from==='agent'?'me':'them';
-      return '<div class="bubble '+cls+'">'+esc(m.text)+'</div><div class="time">'+fmtTime(m.at)+'</div>';
-    }).join('');
-    scrollBottom();
-  }
-  // 当前会话轮询刷新
-  function pollCurrent(){
+
+  // 长轮询当前会话
+  function loopCurrent(){
     if(!curVid) return;
-    api('/api/thread?visitor_id='+encodeURIComponent(curVid)).then(function(d){
-      if(d.messages && d.messages.length!==lastCount){ render(d.messages); lastCount=d.messages.length; }
-    }).catch(function(){});
+    api('/api/thread?visitor_id='+encodeURIComponent(curVid)+'&since='+lastAt).then(function(d){
+      if(d.messages && d.messages.length){ d.messages.forEach(appendMsg); }
+      loopCurrent();
+    }).catch(function(){ setTimeout(loopCurrent, 2000); });
   }
   function startPolling(){
     loadList();
-    setInterval(loadList, 4000);
-    setInterval(pollCurrent, 3000);
+    setInterval(loadList, 5000);
+    loopCurrent();
   }
 
-  // 发送
-  function send(){
+  // 压缩图片
+  function compressImage(file, cb){
+    var reader=new FileReader();
+    reader.onload=function(e){
+      var img=new Image();
+      img.onload=function(){
+        var max=1000, w=img.width, h=img.height;
+        if(w>max||h>max){ if(w>h){ h=h*max/w; w=max; } else { w=w*max/h; h=max; } }
+        var c=document.createElement('canvas'); c.width=w; c.height=h;
+        c.getContext('2d').drawImage(img,0,0,w,h);
+        cb(c.toDataURL('image/jpeg',0.75));
+      };
+      img.src=e.target.result;
+    };
+    reader.readAsDataURL(file);
+  }
+
+  // 发送（文字或图片）
+  function sendText(){
     if(!curVid){ alert('请先选择一个会话'); return; }
     var text=inp.value.trim(); if(!text) return;
     sendBtn.disabled=true;
     api('/api/reply',{method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({visitor_id:curVid,text:text})}).then(function(d){
-      if(d.ok){ inp.value=''; pollCurrent(); }
+      if(d.ok){ inp.value=''; if(d.msg) appendMsg({id:d.msg.id,from:'agent',text:d.msg.text,at:d.msg.at,image:d.msg.image}); }
       else alert(d.error||'发送失败');
     }).catch(function(){ alert('网络错误'); })
     .finally(function(){ sendBtn.disabled=false; });
   }
-  sendBtn.onclick=send;
-  inp.addEventListener('keydown',function(e){ if(e.key==='Enter') send(); });
+  function sendImage(dataUrl){
+    if(!curVid){ alert('请先选择一个会话'); return; }
+    api('/api/reply',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({visitor_id:curVid, image:dataUrl})}).then(function(d){
+      if(d.ok){ if(d.msg) appendMsg({id:d.msg.id,from:'agent',text:d.msg.text,at:d.msg.at,image:d.msg.image}); }
+      else alert(d.error||'发送失败');
+    }).catch(function(){ alert('网络错误'); });
+  }
+  sendBtn.onclick=sendText;
+  inp.addEventListener('keydown',function(e){ if(e.key==='Enter') sendText(); });
+  imgBtn.onclick=function(){ imgInput.click(); };
+  imgInput.onchange=function(){ var f=imgInput.files[0]; if(!f) return; imgInput.value=''; compressImage(f, sendImage); };
 
   // 移动端返回按钮
   document.getElementById('back').onclick=function(){ side.classList.toggle('show'); };
