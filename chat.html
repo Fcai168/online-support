@@ -77,7 +77,7 @@
       sendBtn=document.getElementById('sendBtn'), dot=document.getElementById('dot'),
       statusText=document.getElementById('statusText'),
       imgBtn=document.getElementById('imgBtn'), imgInput=document.getElementById('imgInput');
-  var renderedIds={}, lastAt=0, polling=true;
+  var renderedIds={}, lastAt=0, lastId='', polling=true;
 
   function api(u,opt){ return fetch(u,opt).then(function(r){return r.json();}); }
   function scrollBottom(){ msgsEl.scrollTop=msgsEl.scrollHeight; }
@@ -88,50 +88,57 @@
     if(renderedIds[m.id]) return;
     renderedIds[m.id]=true;
     var cls = m.from==='visitor' ? 'me' : 'them';
-    var html;
-    if(m.image){ html='<div class="bubble img '+cls+'"><img src="'+m.image+'" onclick="window.open(this.src)"></div>'; }
-    else if(m.text){ html='<div class="bubble '+cls+'">'+esc(m.text)+'</div>'; }
-    else return;
-    msgsEl.insertAdjacentHTML('beforeend', html+'<div class="time">'+fmtTime(m.at)+'</div>');
+    var timeEl=document.createElement('div'); timeEl.className='time'; timeEl.textContent=fmtTime(m.at);
+    if(m.image && /^data:image\/(jpeg|png|webp|gif);base64,/.test(m.image)){
+      var wrap=document.createElement('div'); wrap.className='bubble img '+cls;
+      var img=document.createElement('img'); img.src=m.image; img.alt='图片';
+      img.onclick=function(){ window.open(this.src); };
+      wrap.appendChild(img); msgsEl.appendChild(wrap);
+    } else if(m.text){
+      var b=document.createElement('div'); b.className='bubble '+cls; b.textContent=m.text;
+      msgsEl.appendChild(b);
+    } else return;
+    msgsEl.appendChild(timeEl);
     scrollBottom();
-    var nearBottom = msgsEl.scrollHeight - msgsEl.scrollTop - msgsEl.clientHeight < 120;
-    if(nearBottom) scrollBottom();
     if(m.from==='agent'){ dot.classList.remove('off'); statusText.textContent='在线'; }
   }
 
-  // 轮询：每秒查一次新消息（since 增量），接近实时又稳定
+  // 轮询：每5秒查一次新消息（复合游标 at+id，杜绝漏消息）
   function loop(){
     if(!polling) return;
-    api('/api/messages?visitor_id='+encodeURIComponent(vid)+'&since='+lastAt).then(function(d){
+    api('/api/messages?visitor_id='+encodeURIComponent(vid)+'&sinceAt='+lastAt+'&sinceId='+encodeURIComponent(lastId)).then(function(d){
       if(d.messages && d.messages.length){
-        d.messages.forEach(function(m){ appendMsg(m); if(m.at>lastAt) lastAt=m.at; });
+        d.messages.forEach(function(m){ appendMsg(m); if(m.at>lastAt || (m.at===lastAt && m.id>lastId)){ lastAt=m.at; lastId=m.id; } });
       }
     }).catch(function(){}).finally(function(){
-      if(polling) setTimeout(loop, 1000); // 每秒轮询
+      if(polling) setTimeout(loop, 5000); // 5秒轮询，降低请求量
     });
   }
 
-  // 压缩图片到 dataURL
+  // 压缩图片到 dataURL（限600px，控制体积≤300KB）
   function compressImage(file, cb){
     var reader=new FileReader();
     reader.onload=function(e){
       var img=new Image();
       img.onload=function(){
-        var max=1000, w=img.width, h=img.height;
-        if(w>max||h>max){ if(w>h){ h=h*max/w; w=max; } else { w=w*max/h; h=max; } }
+        var max=600, w=img.width, h=img.height;
+        if(w>max||h>max){ if(w>h){ h=Math.round(h*max/w); w=max; } else { w=Math.round(w*max/h); h=max; } }
         var c=document.createElement('canvas'); c.width=w; c.height=h;
         c.getContext('2d').drawImage(img,0,0,w,h);
-        cb(c.toDataURL('image/jpeg',0.75));
+        var url=c.toDataURL('image/jpeg',0.6);
+        if(url.length>300000){ url=c.toDataURL('image/jpeg',0.4); } // 仍超则再降质
+        cb(url);
       };
       img.src=e.target.result;
     };
     reader.readAsDataURL(file);
   }
+  function advance(m){ if(m){ if(m.at>lastAt || (m.at===lastAt && m.id>lastId)){ lastAt=m.at; lastId=m.id; } } }
   function sendImage(dataUrl){
     sendBtn.disabled=true;
     api('/api/send',{method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({visitor_id:vid, image:dataUrl})}).then(function(d){
-      if(d.ok){ if(d.msg) appendMsg({id:d.msg.id,from:'visitor',text:d.msg.text,at:d.msg.at,image:d.msg.image}), (d.msg.at>lastAt&&(lastAt=d.msg.at)); }
+      if(d.ok){ if(d.msg){ appendMsg({id:d.msg.id,from:'visitor',text:d.msg.text,at:d.msg.at,image:d.msg.image}); advance(d.msg); } }
       else alert(d.error||'发送失败');
     }).catch(function(){ alert('网络错误'); })
     .finally(function(){ sendBtn.disabled=false; });
@@ -147,7 +154,7 @@
     sendBtn.disabled=true;
     api('/api/send',{method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({visitor_id:vid,text:text})}).then(function(d){
-      if(d.ok){ inp.value=''; if(d.msg){ appendMsg({id:d.msg.id,from:'visitor',text:d.msg.text,at:d.msg.at}); if(d.msg.at>lastAt)lastAt=d.msg.at; } }
+      if(d.ok){ inp.value=''; if(d.msg){ appendMsg({id:d.msg.id,from:'visitor',text:d.msg.text,at:d.msg.at}); advance(d.msg); } }
       else alert(d.error||'发送失败');
     }).catch(function(){ alert('网络错误'); })
     .finally(function(){ sendBtn.disabled=false; });
@@ -157,7 +164,7 @@
 
   api('/api/session',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({visitor_id:vid,name:name})}).then(function(){
-      loop(); // 长轮询实时接收
+      loop(); // 轮询实时接收
   });
 })();
 </script>

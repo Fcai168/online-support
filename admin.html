@@ -93,7 +93,7 @@
 <script>
 (function(){
   var AKEY = sessionStorage.getItem('os_admin_key') || '';
-  var curVid=null, curName='', renderedIds={}, lastAt=0;
+  var curVid=null, curName='', renderedIds={}, lastAt=0, lastId='', pollGen=0;
   var vlist=document.getElementById('vlist'), msgsEl=document.getElementById('msgs'),
       inp=document.getElementById('inp'), sendBtn=document.getElementById('sendBtn'),
       chatName=document.getElementById('chatName'), side=document.getElementById('side'),
@@ -142,7 +142,8 @@
           if(newVid!==curVid){
             curVid=newVid; curName=el.getAttribute('data-name');
             chatName.textContent=curName;
-            msgsEl.innerHTML=''; renderedIds={}; lastAt=0; // 切换会话重置
+            msgsEl.innerHTML=''; renderedIds={}; lastAt=0; lastId='';
+            pollGen++; // 代次+1，作废旧轮询链
           }
           side.classList.remove('show');
         };
@@ -150,29 +151,37 @@
     }).catch(function(){});
   }
 
-  // 追加一条消息
+  // 追加一条消息（图片用DOM渲染，防XSS）
   function appendMsg(m){
     if(renderedIds[m.id]) return;
     renderedIds[m.id]=true;
     if(msgsEl.querySelector('.placeholder')) msgsEl.innerHTML='';
     var cls=m.from==='agent'?'me':'them';
-    var html;
-    if(m.image){ html='<div class="bubble img '+cls+'"><img src="'+m.image+'" onclick="window.open(this.src)"></div>'; }
-    else if(m.text){ html='<div class="bubble '+cls+'">'+esc(m.text)+'</div>'; }
-    else return;
-    msgsEl.insertAdjacentHTML('beforeend', html+'<div class="time">'+fmtTime(m.at)+'</div>');
+    var timeEl=document.createElement('div'); timeEl.className='time'; timeEl.textContent=fmtTime(m.at);
+    if(m.image && /^data:image\/(jpeg|png|webp|gif);base64,/.test(m.image)){
+      var wrap=document.createElement('div'); wrap.className='bubble img '+cls;
+      var img=document.createElement('img'); img.src=m.image; img.alt='图片';
+      img.onclick=function(){ window.open(this.src); };
+      wrap.appendChild(img); msgsEl.appendChild(wrap);
+    } else if(m.text){
+      var b=document.createElement('div'); b.className='bubble '+cls; b.textContent=m.text;
+      msgsEl.appendChild(b);
+    } else return;
+    msgsEl.appendChild(timeEl);
     var nearBottom = msgsEl.scrollHeight - msgsEl.scrollTop - msgsEl.clientHeight < 150;
     if(nearBottom) scrollBottom();
-    if(m.at>lastAt) lastAt=m.at;
+    if(m.at>lastAt || (m.at===lastAt && m.id>lastId)){ lastAt=m.at; lastId=m.id; }
   }
 
-  // 轮询当前会话：每秒查一次新消息（since 增量）
+  // 轮询当前会话：每5秒查一次（复合游标+代次校验，防切换会话串消息）
   function loopCurrent(){
     if(!curVid) return;
-    api('/api/thread?visitor_id='+encodeURIComponent(curVid)+'&since='+lastAt).then(function(d){
+    var gen=pollGen, vid=curVid;
+    api('/api/thread?visitor_id='+encodeURIComponent(vid)+'&sinceAt='+lastAt+'&sinceId='+encodeURIComponent(lastId)).then(function(d){
+      if(gen!==pollGen) return; // 会话已切换，丢弃本次结果
       if(d.messages && d.messages.length){ d.messages.forEach(appendMsg); }
     }).catch(function(){}).finally(function(){
-      if(curVid) setTimeout(loopCurrent, 1000);
+      if(gen===pollGen && curVid) setTimeout(loopCurrent, 5000);
     });
   }
   function startPolling(){
@@ -181,17 +190,19 @@
     loopCurrent();
   }
 
-  // 压缩图片
+  // 压缩图片（限600px，控制体积≤300KB）
   function compressImage(file, cb){
     var reader=new FileReader();
     reader.onload=function(e){
       var img=new Image();
       img.onload=function(){
-        var max=1000, w=img.width, h=img.height;
-        if(w>max||h>max){ if(w>h){ h=h*max/w; w=max; } else { w=w*max/h; h=max; } }
+        var max=600, w=img.width, h=img.height;
+        if(w>max||h>max){ if(w>h){ h=Math.round(h*max/w); w=max; } else { w=Math.round(w*max/h); h=max; } }
         var c=document.createElement('canvas'); c.width=w; c.height=h;
         c.getContext('2d').drawImage(img,0,0,w,h);
-        cb(c.toDataURL('image/jpeg',0.75));
+        var url=c.toDataURL('image/jpeg',0.6);
+        if(url.length>300000){ url=c.toDataURL('image/jpeg',0.4); }
+        cb(url);
       };
       img.src=e.target.result;
     };

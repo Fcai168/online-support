@@ -1,5 +1,5 @@
-// 在线客服后端 Worker（Cloudflare Pages Functions）—— D1 + 实时长轮询 + 图片
-// 存储：D1（写完立即可读）；实时：long-polling（有新消息立即返回，接近实时）
+// 在线客服后端 Worker（Cloudflare Pages Functions）—— D1 + 短轮询 + 图片
+// 存储：D1（写完立即可读）；实时：前端每秒/数秒轮询（since 增量）
 // 绑定名：CHAT_DB（D1）
 // 密钥：ADMIN_KEY（环境变量）
 // 表：sessions(...) / messages(id PK, visitor_id, sender, text, at, image)
@@ -18,7 +18,6 @@ function json(data, status = 200) {
 }
 function now() { return new Date().toISOString(); }
 function id() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 8); }
-const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 let _inited = false;
 async function ensureTables(env) {
@@ -42,7 +41,8 @@ async function ensureTables(env) {
       at INTEGER,
       image TEXT
     )`),
-    env.CHAT_DB.prepare(`CREATE INDEX IF NOT EXISTS idx_msg_vid ON messages(visitor_id, at)`)
+    env.CHAT_DB.prepare(`CREATE INDEX IF NOT EXISTS idx_msg_vid ON messages(visitor_id, at)`),
+    env.CHAT_DB.prepare(`CREATE INDEX IF NOT EXISTS idx_msg_vid_id ON messages(visitor_id, id)`)
   ]);
   // 迁移：老表若无 image 列则补上
   const info = await env.CHAT_DB.prepare('PRAGMA table_info(messages)').all();
@@ -70,23 +70,23 @@ async function touchVisitor(env, vid, s) {
 async function addMsg(env, vid, msg) {
   await env.CHAT_DB.prepare('INSERT INTO messages(id,visitor_id,sender,text,at,image) VALUES(?,?,?,?,?,?)')
     .bind(msg.id, vid, msg.sender, msg.text, msg.at, msg.image || null).run();
+  // 保留策略：按 id 降序保留最近 200 条（id 单调递增，同毫秒也不会误删）
   await env.CHAT_DB.prepare(
     `DELETE FROM messages WHERE visitor_id=? AND id NOT IN
-     (SELECT id FROM messages WHERE visitor_id=? ORDER BY at DESC LIMIT 500)`
+     (SELECT id FROM messages WHERE visitor_id=? ORDER BY id DESC LIMIT 200)`
   ).bind(vid, vid).run();
 }
 function mapMsg(m) {
   return { id: m.id, from: m.sender, text: m.text, at: m.at, image: m.image || null };
 }
-async function getNewMsgs(env, vid, since) {
+// 复合游标：at 优先，同 at 用 id 兜底，杜绝同毫秒漏消息
+async function getNewMsgs(env, vid, sinceAt, sinceId) {
   const r = await env.CHAT_DB.prepare(
-    'SELECT id,sender,text,at,image FROM messages WHERE visitor_id=? AND at>? ORDER BY at ASC'
-  ).bind(vid, since || 0).all();
+    `SELECT id,sender,text,at,image FROM messages
+     WHERE visitor_id=? AND (at > ? OR (at = ? AND id > ?))
+     ORDER BY at ASC, id ASC`
+  ).bind(vid, sinceAt || 0, sinceAt || 0, sinceId || '').all();
   return (r.results || []).map(mapMsg);
-}
-// 短轮询：查一次立即返回（不等太久，避免反代/超时问题），由前端高频重连实现接近实时
-async function longPoll(env, vid, since, maxMs) {
-  return await getNewMsgs(env, vid, since);
 }
 
 function checkAdmin(request, env) {
@@ -95,13 +95,18 @@ function checkAdmin(request, env) {
   if (key !== env.ADMIN_KEY) return { ok: false, msg: '口令错误' };
   return { ok: true };
 }
+// 图片白名单：必须是 data:image/(jpeg|png|webp|gif);base64, 且 ≤300KB
+const IMG_RE = /^data:image\/(jpeg|png|webp|gif);base64,[A-Za-z0-9+/=\s]+$/;
 function validMsg(text, image) {
   const hasText = typeof text === 'string' && text.trim().length > 0;
   const hasImg = typeof image === 'string' && image.length > 0;
-  if (!hasText && !hasImg) return false;
-  if (hasText && text.length > 2000) return false;
-  if (hasImg && image.length > 2000000) return false;
-  return true;
+  if (!hasText && !hasImg) return { ok: false, error: '消息内容不合法' };
+  if (hasText && text.length > 2000) return { ok: false, error: '文字过长' };
+  if (hasImg) {
+    if (!IMG_RE.test(image)) return { ok: false, error: '图片格式不支持' };
+    if (image.length > 300000) return { ok: false, error: '图片过大（请压缩后重试）' };
+  }
+  return { ok: true };
 }
 
 export async function onRequest(context) {
@@ -139,7 +144,8 @@ export async function onRequest(context) {
       const { visitor_id, image } = body;
       const text = body.text;
       if (!visitor_id) return json({ error: '缺少 visitor_id' }, 400);
-      if (!validMsg(text, image)) return json({ error: '消息内容不合法' }, 400);
+      const v = validMsg(text, image);
+      if (!v.ok) return json({ error: v.error }, 400);
 
       let s = await getSession(env, visitor_id);
       if (!s) return json({ error: '会话不存在，请先 /api/session 创建' }, 404);
@@ -155,12 +161,13 @@ export async function onRequest(context) {
       return json({ ok: true, msg: { id: msg.id, from: 'visitor', text: msg.text, at: msg.at, image: msg.image } });
     }
 
-    // ---- 拉取新消息（长轮询，接近实时） ----
+    // ---- 拉取新消息（复合游标） ----
     if (path === '/messages' && request.method === 'GET') {
       const vid = url.searchParams.get('visitor_id');
-      const since = parseInt(url.searchParams.get('since') || '0', 10);
       if (!vid) return json({ error: '缺少 visitor_id' }, 400);
-      const msgs = await longPoll(env, vid, since, 18000);
+      const sinceAt = parseInt(url.searchParams.get('sinceAt') || '0', 10);
+      const sinceId = url.searchParams.get('sinceId') || '';
+      const msgs = await getNewMsgs(env, vid, sinceAt, sinceId);
       return json({ messages: msgs });
     }
 
@@ -177,14 +184,15 @@ export async function onRequest(context) {
       return json({ visitors: list });
     }
 
-    // ---- 客服：拉取某访客消息（长轮询 + 标记已读） ----
+    // ---- 客服：拉取某访客消息（复合游标 + 标记已读） ----
     if (path === '/thread' && request.method === 'GET') {
       if (!checkAdmin(request, env).ok) return json({ error: '未授权' }, 401);
       const vid = url.searchParams.get('visitor_id');
       if (!vid) return json({ error: '缺少 visitor_id' }, 400);
-      const since = parseInt(url.searchParams.get('since') || '0', 10);
+      const sinceAt = parseInt(url.searchParams.get('sinceAt') || '0', 10);
+      const sinceId = url.searchParams.get('sinceId') || '';
       const s = await getSession(env, vid);
-      const msgs = await longPoll(env, vid, since, 18000);
+      const msgs = await getNewMsgs(env, vid, sinceAt, sinceId);
       if (msgs.length > 0 && s && (s.unread_for_agent || 0) > 0) {
         s.unread_for_agent = 0;
         s.agent_read_at = Date.now();
@@ -200,7 +208,8 @@ export async function onRequest(context) {
       const { visitor_id, image } = body;
       const text = body.text;
       if (!visitor_id) return json({ error: '缺少 visitor_id' }, 400);
-      if (!validMsg(text, image)) return json({ error: '消息内容不合法' }, 400);
+      const v = validMsg(text, image);
+      if (!v.ok) return json({ error: v.error }, 400);
 
       let s = await getSession(env, visitor_id);
       if (!s) return json({ error: '会话不存在' }, 404);
@@ -228,6 +237,6 @@ export async function onRequest(context) {
 
     return json({ error: 'Not Found' }, 404);
   } catch (e) {
-    return json({ error: '服务器错误: ' + e.message }, 500);
+    return json({ error: '服务器错误' }, 500); // 不回显内部细节
   }
 }
