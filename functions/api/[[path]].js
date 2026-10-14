@@ -76,10 +76,10 @@ async function addMsg(env, vid, msg) {
     `DELETE FROM messages WHERE visitor_id=? AND image IS NOT NULL AND id NOT IN
      (SELECT id FROM messages WHERE visitor_id=? AND image IS NOT NULL ORDER BY id DESC LIMIT 100)`
   ).bind(vid, vid).run();
-  // 2) 文字消息，每个客户最多保留最近 300 条
+  // 2) 文字消息，每个客户最多保留最近 400 条
   await env.CHAT_DB.prepare(
     `DELETE FROM messages WHERE visitor_id=? AND image IS NULL AND id NOT IN
-     (SELECT id FROM messages WHERE visitor_id=? AND image IS NULL ORDER BY id DESC LIMIT 300)`
+     (SELECT id FROM messages WHERE visitor_id=? AND image IS NULL ORDER BY id DESC LIMIT 400)`
   ).bind(vid, vid).run();
 }
 function mapMsg(m) {
