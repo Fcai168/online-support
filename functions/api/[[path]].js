@@ -70,12 +70,17 @@ async function touchVisitor(env, vid, s) {
 async function addMsg(env, vid, msg) {
   await env.CHAT_DB.prepare('INSERT INTO messages(id,visitor_id,sender,text,at,image) VALUES(?,?,?,?,?,?)')
     .bind(msg.id, vid, msg.sender, msg.text, msg.at, msg.image || null).run();
-  // 全局滚动保留最新 3000 条：所有客户聊天加起来超过 3000 条，就删最早的
-  // id 单调递增，按 id 降序取前 3000 保留，其余删除
+  // 保留策略（每个客户独立计数，互不挤占，id 单调递增不会误删）：
+  // 1) 图片体积大，每个客户最多保留最近 100 张
   await env.CHAT_DB.prepare(
-    `DELETE FROM messages WHERE id NOT IN
-     (SELECT id FROM messages ORDER BY id DESC LIMIT 3000)`
-  ).run();
+    `DELETE FROM messages WHERE visitor_id=? AND image IS NOT NULL AND id NOT IN
+     (SELECT id FROM messages WHERE visitor_id=? AND image IS NOT NULL ORDER BY id DESC LIMIT 100)`
+  ).bind(vid, vid).run();
+  // 2) 文字消息，每个客户最多保留最近 300 条
+  await env.CHAT_DB.prepare(
+    `DELETE FROM messages WHERE visitor_id=? AND image IS NULL AND id NOT IN
+     (SELECT id FROM messages WHERE visitor_id=? AND image IS NULL ORDER BY id DESC LIMIT 300)`
+  ).bind(vid, vid).run();
 }
 function mapMsg(m) {
   return { id: m.id, from: m.sender, text: m.text, at: m.at, image: m.image || null };
