@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>调试</title>
+<style>
+body{font-family:monospace;padding:16px;background:#1e293b;color:#0f0;font-size:13px;line-height:1.8;}
+.box{background:#0f172a;padding:12px;border-radius:8px;margin:8px 0;white-space:pre-wrap;word-break:break-all;}
+.ok{color:#4ade80;} .err{color:#f87171;}
+</style>
+</head>
+<body>
+<h3>🔍 客服后台调试</h3>
+<div class="box" id="out">测试中...</div>
+<script>
+var out=document.getElementById('out');
+function log(s,cls){ out.innerHTML += '<span class="'+(cls||'')+'">'+s+'</span>\n'; }
+
+log('1. JS是否运行: ✅ (能看到这行就说明JS正常)','ok');
+
+// 测试fetch能否调通API
+log('2. 测试fetch /api/visitors ...');
+fetch('/api/visitors',{headers:{'x-admin-key':'WLBagdJxIC0OpSIM'}})
+  .then(function(r){ log('   HTTP状态: '+r.status, r.status===200?'ok':'err'); return r.json(); })
+  .then(function(d){
+    if(d.error){ log('   API返回错误: '+d.error,'err'); return; }
+    log('   ✅ 访客数: '+(d.visitors?d.visitors.length:0),'ok');
+    if(d.visitors && d.visitors.length){
+      var vid=d.visitors[0].visitor_id;
+      log('3. 测试点击逻辑(模拟拉thread '+vid+') ...');
+      return fetch('/api/thread?visitor_id='+vid+'&sinceAt=0&sinceId=',{headers:{'x-admin-key':'WLBagdJxIC0OpSIM'}})
+        .then(function(r2){ log('   thread HTTP: '+r2.status, r2.status===200?'ok':'err'); return r2.json(); })
+        .then(function(d2){
+          log('   ✅ thread消息数: '+(d2.messages?d2.messages.length:0),'ok');
+          log('\n=== 结论 ===','ok');
+          log('如果上面都是✅，说明API和fetch都正常，','ok');
+          log('问题在admin.html的渲染/点击绑定，请告诉我。','ok');
+        });
+    }
+  })
+  .catch(function(e){ log('   ❌ fetch失败: '+e.message,'err'); log('\n这就是电脑端的问题：浏览器拦截了请求','err'); });
+</script>
+</body>
+</html>
