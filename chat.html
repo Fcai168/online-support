@@ -169,6 +169,22 @@
     compressImage(f, sendImage);
   };
 
+  // 支持粘贴图片（截图后Ctrl+V、或从别处复制图片粘贴）
+  document.addEventListener('paste', function(e){
+    var items = (e.clipboardData || window.clipboardData).items;
+    if(!items) return;
+    for(var i=0; i<items.length; i++){
+      if(items[i].type.indexOf('image') === 0){
+        var file = items[i].getAsFile();
+        if(file){
+          e.preventDefault();
+          compressImage(file, sendImage);
+          return;
+        }
+      }
+    }
+  });
+
   function send(){
     var text=inp.value.trim(); if(!text) return;
     sendBtn.disabled=true;
