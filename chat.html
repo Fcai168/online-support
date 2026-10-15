@@ -123,19 +123,31 @@
     });
   }
 
-  // 压缩图片到 dataURL（限600px，控制体积≤300KB）
+  // 压缩图片到 dataURL（循环降质直到≤300KB，彻底解决大图发不出）
   function compressImage(file, cb){
     var reader=new FileReader();
     reader.onload=function(e){
       var img=new Image();
       img.onload=function(){
-        var max=600, w=img.width, h=img.height;
+        var sizes=[480,360,280], max=sizes[0], w=img.width, h=img.height;
         if(w>max||h>max){ if(w>h){ h=Math.round(h*max/w); w=max; } else { w=Math.round(w*max/h); h=max; } }
         var c=document.createElement('canvas'); c.width=w; c.height=h;
         c.getContext('2d').drawImage(img,0,0,w,h);
-        var url=c.toDataURL('image/jpeg',0.6);
-        if(url.length>300000){ url=c.toDataURL('image/jpeg',0.4); } // 仍超则再降质
-        cb(url);
+        // 三级降质循环：先分辨率降到480/360/280，再画质0.6→0.4→0.25→0.1
+        var qualities=[0.6,0.4,0.25,0.1], si=0, qi=0, url='';
+        function tryNext(){
+          url=c.toDataURL('image/jpeg', qualities[qi]);
+          if(url.length<=300000 || (si>=sizes.length-1 && qi>=qualities.length-1)){ cb(url); return; }
+          // 先降质，降到底再降分辨率
+          if(qi<qualities.length-1){ qi++; tryNext(); }
+          else { si++; qi=0;
+            max=sizes[si]; w=img.width; h=img.height;
+            if(w>max||h>max){ if(w>h){ h=Math.round(h*max/w); w=max; } else { w=Math.round(w*max/h); h=max; } }
+            c.width=w; c.height=h; c.getContext('2d').drawImage(img,0,0,w,h);
+            tryNext();
+          }
+        }
+        tryNext();
       };
       img.src=e.target.result;
     };
