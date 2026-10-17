@@ -4,32 +4,93 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
-<meta http-equiv="Pragma" content="no-cache">
-<meta http-equiv="Expires" content="0">
-<title>用户服务中心</title>
+<meta name="theme-color" content="#ffffff">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="入职接待">
+<title>入职接待中心</title>
 <style>
-  * { margin:0; padding:0; box-sizing:border-box; }
+  * { margin:0; padding:0; box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  html,body { min-height:100%; overflow-x:hidden; }
   body { font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;
-    background:linear-gradient(160deg,#1e3a8a,#3b82f6); min-height:100vh;
-    display:flex; align-items:center; justify-content:center; color:#fff; padding:20px; }
-  .card { background:#fff; color:#1e293b; border-radius:20px; padding:44px 36px;
-    width:100%; max-width:400px; text-align:center; box-shadow:0 20px 60px rgba(0,0,0,.3); }
-  .logo { font-size:56px; }
-  h1 { font-size:24px; margin:14px 0 8px; }
-  .sub { color:#64748b; font-size:14px; margin-bottom:28px; }
-  .btn { display:block; background:#3b82f6; color:#fff; text-decoration:none;
-    padding:14px; border-radius:12px; font-size:17px; font-weight:600; margin-bottom:12px; }
-  .btn:active { opacity:.9; }
-  .btn.ghost { background:#f1f5f9; color:#334155; }
+    background:#f0f4f8; color:#1e293b;
+    display:flex; align-items:center; justify-content:center; padding:20px; }
+  .page { max-width:520px; width:100%; padding:0 20px calc(16px + env(safe-area-inset-bottom)); }
+  .hero { text-align:center; padding:0 0 16px; }
+  .hero .logo { width:56px; height:56px; border-radius:16px;
+    background:linear-gradient(135deg,#3b82f6,#60a5fa); margin:0 auto 10px;
+    display:flex; align-items:center; justify-content:center; font-size:28px;
+    box-shadow:0 8px 20px rgba(59,130,246,.28); }
+  .hero h1 { font-size:22px; font-weight:700; letter-spacing:.5px; }
+  .hero .tag { display:inline-block; margin-top:7px; font-size:12px; color:#3b82f6;
+    background:#e0edff; padding:4px 12px; border-radius:20px; font-weight:500; }
+  .steps { background:#fff; border-radius:14px; padding:16px 18px; margin-bottom:14px;
+    box-shadow:0 4px 16px rgba(30,58,138,.06); }
+  .steps h2 { font-size:15px; margin-bottom:8px; display:flex; align-items:center; gap:6px; }
+  .step { display:flex; align-items:center; gap:12px; padding:6px 0; }
+  .step .num { flex-shrink:0; width:24px; height:24px; border-radius:50%;
+    background:#3b82f6; color:#fff; font-size:13px; font-weight:600;
+    display:flex; align-items:center; justify-content:center; }
+  .step .txt { display:flex; flex-direction:column; gap:2px; }
+  .step .txt b { font-size:14px; }
+  .step .txt span { font-size:12px; color:#64748b; }
+  .cta { display:block; background:linear-gradient(135deg,#3b82f6,#2563eb); color:#fff;
+    text-decoration:none; text-align:center; padding:16px; border-radius:13px;
+    font-size:18px; font-weight:700; letter-spacing:1px; margin-bottom:14px;
+    box-shadow:0 8px 20px rgba(37,99,235,.3); }
+  .cta:active { opacity:.9; }
+  .notice { background:#fffbeb; border:1px solid #fde68a; border-radius:12px;
+    padding:13px 16px; }
+  .notice h3 { font-size:13px; color:#92400e; margin-bottom:7px; }
+  .notice ul { list-style:none; }
+  .notice li { font-size:12px; color:#78350f; line-height:1.8; padding-left:15px; position:relative; }
+  .notice li::before { content:'•'; position:absolute; left:4px; color:#d97706; font-weight:700; }
+  .foot { text-align:center; margin-top:16px; }
+  .foot span { color:#cbd5e1; font-size:11px; font-style:italic; }
 </style>
 </head>
 <body>
-<div class="card">
-  <div class="logo">💬</div>
-  <h1>用户服务中心</h1>
-  <div class="sub">7×24 小时在线，随时为您解答</div>
-  <a class="btn" href="/chat">开始咨询</a>
-  <a class="btn ghost" href="/admin">客服工作台</a>
+<div class="page">
+  <div class="hero">
+    <div class="logo">🎉</div>
+    <h1>入职接待中心</h1>
+    <div class="tag">面试入职 · 快速响应</div>
+  </div>
+  <div class="steps">
+    <h2>📋 入职流程</h2>
+    <div class="step">
+      <div class="num">1</div>
+      <div class="txt"><b>线上报到</b><span>添加面试联系人，确认时间与会议链接</span></div>
+    </div>
+    <div class="step">
+      <div class="num">2</div>
+      <div class="txt"><b>线上面试</b><span>视频面试，了解基本情况与岗位匹配度</span></div>
+    </div>
+    <div class="step">
+      <div class="num">3</div>
+      <div class="txt"><b>工作介绍</b><span>岗位职责、工作内容、薪资待遇及注意事项</span></div>
+    </div>
+    <div class="step">
+      <div class="num">4</div>
+      <div class="txt"><b>简单培训</b><span>基础操作培训，熟悉工作流程与要求</span></div>
+    </div>
+    <div class="step">
+      <div class="num">5</div>
+      <div class="txt"><b>确认入职</b><span>确认意向，办理相关入职手续</span></div>
+    </div>
+  </div>
+  <a class="cta" href="/chat">立即进入面试</a>
+  <div class="notice">
+    <h3>⚠️ 入职须知</h3>
+    <ul>
+      <li>本中心负责线上入职接待与手续办理</li>
+      <li>请如实填写姓名和电话，以便通知</li>
+      <li>通过面试后安排培训并确认入职</li>
+    </ul>
+  </div>
+  <div class="foot">
+    <span>入职接待中心 · 面试时间 每日 9:00 - 21:00 · <a href="/admin" style="color:#cbd5e1;font-size:11px;">客服工作台</a></span>
+  </div>
 </div>
 </body>
 </html>
